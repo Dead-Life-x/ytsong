@@ -1,11 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from ytmusicapi import YTMusic
-import yt_dlp
+import requests
 
 app = FastAPI(title="AuraMusic Backend API")
 
-# Website / Frontend se connect karne ke liye CORS setup
+# Website / App se connect karne ke liye CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,6 +16,13 @@ app.add_middleware(
 
 # Initialize YouTube Music Client
 yt = YTMusic()
+
+# Piped instances for stream extraction (Bypasses YouTube bot block)
+STREAM_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://api-piped.mha.fi",
+    "https://pipedapi.tokhmi.xyz"
+]
 
 @app.get("/")
 def home():
@@ -41,36 +48,27 @@ def search_songs(q: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
-# 2. Extract Direct Audio Stream Link Endpoint
+# 2. Extract Direct Audio Stream (Fail-safe via Piped Instances)
 @app.get("/stream")
 def get_audio_stream(id: str):
     if not id:
         raise HTTPException(status_code=400, detail="Song ID is required")
     
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'quiet': True,
-        'skip_download': True,
-        'nocheckcertificate': True,
-        # Ye do parameters YouTube block bypass karte hain:
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'web']
-            }
-        },
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-    }
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={id}", download=False)
-            stream_url = info.get("url")
-            return {
-                "id": id,
-                "audio_url": stream_url
-            }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Stream extraction failed: {str(e)}")
+    # Try active nodes one by one
+    for base in STREAM_INSTANCES:
+        try:
+            res = requests.get(f"{base}/streams/{id}", timeout=6)
+            if res.status_code == 200:
+                data = res.json()
+                audio_streams = data.get("audioStreams", [])
+                if audio_streams:
+                    # Sabse best quality audio URL filter karein
+                    best_audio = sorted(audio_streams, key=lambda x: x.get("bitrate", 0), reverse=True)[0]
+                    return {
+                        "id": id,
+                        "audio_url": best_audio.get("url")
+                    }
+        except Exception:
+            continue
+            
+    raise HTTPException(status_code=500, detail="Stream extraction failed across all nodes.")
